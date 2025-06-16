@@ -3,27 +3,61 @@ import json
 from typing import Optional
 from typing import Sequence
 from pathlib import Path
+import re
+from collections import defaultdict
 
 
-def _check_duplicate_entry(json_entries, pkeys):
-    """ Check duplicate entry based on pkey criteria.
+def extract_version(filepath: str) -> str:
+    """Extract Alembic version from the filename."""
+    return Path(filepath).parents[2].name.strip()
 
-    :param json_entries: List of json entries
-    :param pkeys: List of Primary keys
-    :return: list of duplicated entry pkey value tuples
+def extract_folder_type(filepath: str) -> str:
+    """Extract the folder type from the file path (upgrade/downgrade)."""
+    return Path(filepath).parents[1].name.strip()
+
+def extract_operation_type(filepath: str) -> str:
+    """Extract the operation type from the file path (insert/update/delete)."""
+    return Path(filepath).parent.name.strip()
+
+def get_parallel_files(staged_file: str) -> list:
+    """Get all parallel files with the same table name within the same parent folder.
+    
+    :param staged_file: Path to the staged file
+    :return: List of all related file paths within the same parent folder
     """
-    unique_entries = set()
-    duplicate_entries = set()
-    for entry in json_entries:
-        pkey_value_tuple = tuple(entry[pkey] for pkey in pkeys)
-        if pkey_value_tuple not in unique_entries:
-            unique_entries.add(pkey_value_tuple)
-        else:
-            duplicate_entries.add(pkey_value_tuple)
-    return duplicate_entries, len(duplicate_entries)
-
+    path = Path(staged_file)
+    file_name = path.name
+    parent_folder = path.parents[1]
+    parallel_files = []
+    
+    for operation_type in ['insert', 'update', 'delete']:
+        operation_path = parent_folder / operation_type
+        target_file = operation_path / file_name
+        if target_file.exists():
+            parallel_files.append(str(target_file))
+    
+    return parallel_files
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+
+    def _check_duplicate_entry():
+        """ Check duplicate entry based on pkey criteria.
+
+        :param json_entries: List of json entries
+        :param pkeys: List of Primary keys
+        :return: list of duplicated entry pkey value tuples
+        """
+        for entry in json_entries:
+            pkey_value_tuple = tuple(entry[pkey] for pkey in primary_keys)
+            key = (alembic_version, folder_type, operation_type)
+            
+            if pkey_value_tuple not in unique_entries[key]:
+                unique_entries[key].add(pkey_value_tuple)
+            else:
+                duplicate_entries[key].add(pkey_value_tuple)
+            
+            cross_operation_entries[(alembic_version, file_name, folder_type)][pkey_value_tuple].add(operation_type)
+
     parser = argparse.ArgumentParser()
     parser.add_argument('filenames', nargs='*', type=str,
                         help='Names of the JSON files to check duplicate entries'
@@ -61,31 +95,62 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     }
 
     args = vars(parser.parse_args(argv))
-    filenames = args['filenames']
+    staged_filenames = args['filenames']
     flag = False
 
-    for i in range(len(filenames)):
-        json_file = filenames[i]
-        file_name = Path(filenames[i]).stem
+    unique_entries = defaultdict(set)
+    duplicate_entries = defaultdict(set)
+    cross_operation_entries = defaultdict(lambda: defaultdict(set))
+    
+    all_files_to_check = set()
+    for staged_file in staged_filenames:
+        parallel_files = get_parallel_files(staged_file)
+        all_files_to_check.update(parallel_files)
+
+    for json_file in all_files_to_check:
+        file_name = Path(json_file).stem
         if file_name not in table_uuid_mapping:
             print(
                 f"Table {file_name} has no primary key specified to validate "
                 f"duplicate entries. Please update the plugin code in "
-                f"https://git.voereir.io/voereir/pre-commit-hooks"
+                f"https://github.com/VoerEirAB/pre-commit-hooks.git"
             )
             continue
 
+        alembic_version = extract_version(json_file)
+        folder_type = extract_folder_type(json_file)
+        operation_type = extract_operation_type(json_file)
+
         primary_keys = table_uuid_mapping[file_name]
-        with open(json_file, encoding='UTF-8') as f:
-            json_entries = json.load(f)
-        duplicate_entries, status = _check_duplicate_entry(
-            json_entries, primary_keys)
+        
+        try:
+            with open(json_file, encoding='UTF-8') as f:
+                json_entries = json.load(f)
+            _check_duplicate_entry()
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Warning: Could not read {json_file}: {e}")
+            continue
 
-        if status:
-            print(f"Duplicate entries found - {duplicate_entries} in file "
-                  f"{json_file}")
-            flag = True
-
+    if duplicate_entries:
+        for key in duplicate_entries:
+            if duplicate_entries[key]:
+                alembic_version, folder_type, operation_type = key
+                flag = True
+                print(f"\n Detected duplicate entries within the same file:")
+                print(f"  Version: {alembic_version}")
+                print(f"  Location: {folder_type}/{operation_type}/")
+                print(f"  Duplicates: {duplicate_entries[key]}")
+    
+    for (alembic_version, file_name, folder_type), entries in cross_operation_entries.items():
+        for pkey_value, operation_types in entries.items():
+            if len(operation_types) > 1:
+                flag = True
+                print(f"\n Detected entry in multiple {folder_type} operations:")
+                print(f"  Version: {alembic_version}")
+                print(f"  Table: {file_name}.json")
+                print(f"  Entry: {pkey_value}")
+                print(f"  Operations: {', '.join(sorted(operation_types))}")
+                    
     return flag
 
 
