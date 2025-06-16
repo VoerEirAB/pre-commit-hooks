@@ -3,27 +3,33 @@ import json
 from typing import Optional
 from typing import Sequence
 from pathlib import Path
+import re
 
 
-def _check_duplicate_entry(json_entries, pkeys):
-    """ Check duplicate entry based on pkey criteria.
+def extract_version(filepath: str) -> str:
+    """Extract Alembic version from the filename."""
+    return Path(filepath).parents[2].name.strip()
 
-    :param json_entries: List of json entries
-    :param pkeys: List of Primary keys
-    :return: list of duplicated entry pkey value tuples
-    """
-    unique_entries = set()
-    duplicate_entries = set()
-    for entry in json_entries:
-        pkey_value_tuple = tuple(entry[pkey] for pkey in pkeys)
-        if pkey_value_tuple not in unique_entries:
-            unique_entries.add(pkey_value_tuple)
-        else:
-            duplicate_entries.add(pkey_value_tuple)
-    return duplicate_entries, len(duplicate_entries)
-
+def extract_folder_type(filepath: str) -> str:
+    """Extract the folder type from the file path."""
+    return Path(filepath).parents[1].name.strip()
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+
+    def _check_duplicate_entry():
+        """ Check duplicate entry based on pkey criteria.
+
+        :param json_entries: List of json entries
+        :param pkeys: List of Primary keys
+        :return: list of duplicated entry pkey value tuples
+        """
+        for entry in json_entries:
+            pkey_value_tuple = tuple(entry[pkey] for pkey in primary_keys)
+            if pkey_value_tuple not in unique_entries[alembic_version][folder_type]:
+                unique_entries[alembic_version][folder_type].add(pkey_value_tuple)
+            else:
+                duplicate_entries[alembic_version][folder_type].add(pkey_value_tuple)
+
     parser = argparse.ArgumentParser()
     parser.add_argument('filenames', nargs='*', type=str,
                         help='Names of the JSON files to check duplicate entries'
@@ -64,28 +70,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     filenames = args['filenames']
     flag = False
 
-    for i in range(len(filenames)):
-        json_file = filenames[i]
-        file_name = Path(filenames[i]).stem
+    unique_entries = {}
+    duplicate_entries = {}
+
+    for json_file in filenames:
+        file_name = Path(json_file).stem
         if file_name not in table_uuid_mapping:
             print(
                 f"Table {file_name} has no primary key specified to validate "
                 f"duplicate entries. Please update the plugin code in "
-                f"https://git.voereir.io/voereir/pre-commit-hooks"
+                f"https://github.com/VoerEirAB/pre-commit-hooks.git"
             )
             continue
+
+        alembic_version = extract_version(json_file)
+        folder_type = extract_folder_type(json_file)
+        if alembic_version not in unique_entries:
+            unique_entries[alembic_version] = {'upgrade': set(), 'downgrade': set()}
+            duplicate_entries[alembic_version] = {'upgrade': set(), 'downgrade': set()}
 
         primary_keys = table_uuid_mapping[file_name]
         with open(json_file, encoding='UTF-8') as f:
             json_entries = json.load(f)
-        duplicate_entries, status = _check_duplicate_entry(
-            json_entries, primary_keys)
+        _check_duplicate_entry()
 
-        if status:
-            print(f"Duplicate entries found - {duplicate_entries} in file "
-                  f"{json_file}")
-            flag = True
-
+    if duplicate_entries:
+        for alembic_version in duplicate_entries:
+            for folder_type in duplicate_entries[alembic_version]:
+                if duplicate_entries[alembic_version][folder_type]:
+                    flag = True
+                    print(f"Detected duplicate entries in '{folder_type}' directory for Alembic version '{alembic_version}':")
+                    print(f"  - {duplicate_entries[alembic_version][folder_type]}")
     return flag
 
 
